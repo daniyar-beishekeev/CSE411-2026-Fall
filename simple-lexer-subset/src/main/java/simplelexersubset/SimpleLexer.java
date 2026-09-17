@@ -177,8 +177,29 @@ public final class SimpleLexer {
 
     /* Converts an NFA to a DFA using the subset construction algorithm. */
     static Dfa convertNfaToDfa(final Nfa nfa) {
-      // TODO: Implement the subset construction algorithm to convert the NFA to a DFA.
-      return null; // TODO: Replace it with the actual DFA instance.
+      final Map<Set<Nfa.State>, State> D = new HashMap<Set<Nfa.State>, State>();
+      final Queue<Set<Nfa.State>> W = new ArrayDeque<Set<Nfa.State>>();
+      final Set<Nfa.State> D0 = closure(Collections.singleton(nfa.start));
+      final State startState = new State(acceptingType(D0));
+      D.put(D0, startState);
+      W.add(D0);
+      while (!W.isEmpty()) {
+        final Set<Nfa.State> Q = W.remove();
+        final State currentState = D.get(Q);
+        for (final Character ch : nfa.alphabet) {
+          final Set<Nfa.State> T = closure(move(Q, ch));
+          if (T.isEmpty())
+            continue;
+          State nextState = D.get(T);
+          if (nextState == null) {
+            nextState = new State(acceptingType(T));
+            D.put(T, nextState);
+            W.add(T);
+          }
+          currentState.transitions.put(ch, nextState);
+        }
+      }
+      return new Dfa(startState);
     }
 
     private static Set<Nfa.State> move(final Set<Nfa.State> states, final Character character) {
