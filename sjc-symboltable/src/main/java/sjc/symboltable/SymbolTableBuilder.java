@@ -116,31 +116,87 @@ public class SymbolTableBuilder {
 
     @Override
     public boolean visit(final FieldDeclaration node) {
-      // TODO
+      if (hasPublicModifier(node.modifiers())) {
+        for (final Object ob : node.fragments())
+          this.fieldMap.put(
+                  new Pair<String, String>(this.className,
+                          ((VariableDeclarationFragment) ob).getName().getIdentifier()
+                  ),
+                  node
+          );
+      }
       return false;
     }
 
     @Override
     public boolean visit(final MethodDeclaration node) {
-      // TODO
+      this.nameMap.clear();
+      this.localNames.clear();
+      for (final Object ob : node.parameters()) {
+        final SingleVariableDeclaration parameter = (SingleVariableDeclaration) ob;
+        final String name = parameter.getName().getIdentifier();
+        this.nameMap.put(name, parameter);
+        this.localNames.add(name);
+      }
+      if (node.getBody() != null)
+        node.getBody().accept(this);
+      this.nameMap.clear();
+      this.localNames.clear();
       return false;
     }
 
     @Override
     public boolean visit(final MethodInvocation node) {
-      // TODO
+      final Expression expression = node.getExpression();
+      if (expression != null) {
+        if (expression instanceof SimpleName) {
+          final String receiver = ((SimpleName) expression).getIdentifier();
+          if (this.nameMap.containsKey(receiver)) {
+            expression.accept(this);
+          } else if (!"StaticJavaLib".equals(receiver)
+              && !receiver.equals(this.className)
+              && !this.classMap.containsKey(receiver)) {
+            throw new Error(expression, "Unresolvable symbol \"" + receiver + "\"");
+          }
+        } else {
+          expression.accept(this);
+        }
+      }
+      for (final Object ob : node.arguments())
+        ((ASTNode) ob).accept(this);
+
+      final MethodDeclaration declaration = this.methodMap.get(node.getName().getIdentifier());
+      final boolean currentClassInvocation = expression instanceof SimpleName && ((SimpleName) expression).getIdentifier().equals(this.className);
+      if (declaration != null
+          && (expression == null || currentClassInvocation)) {
+        this.result.put(node, declaration);
+      } else if (declaration == null
+          && (expression == null || currentClassInvocation)) {
+        throw new Error(node, "Unresolvable method \"" + node.getName().getIdentifier() + "\"");
+      }
       return false;
     }
 
     @Override
     public boolean visit(final SimpleName node) {
-      // TODO
+      final ASTNode declaration = this.nameMap.get(node.getIdentifier());
+      if (declaration == null)
+        throw new Error(node, "Unresolvable symbol \"" + node.getIdentifier() + "\"");
+      this.result.put(node, declaration);
       return false;
     }
 
     @Override
     public boolean visit(final VariableDeclarationStatement node) {
-      // TODO
+      for (final Object ob : node.fragments()) {
+        final VariableDeclarationFragment fragment = (VariableDeclarationFragment) ob;
+        final String name = fragment.getName().getIdentifier();
+        if (!this.localNames.add(name))
+          throw new Error(fragment.getName(), "Duplicate local variable \"" + name + "\"");
+        this.nameMap.put(name, node);
+        if (fragment.getInitializer() != null)
+          fragment.getInitializer().accept(this);
+      }
       return false;
     }
 
@@ -177,7 +233,19 @@ public class SymbolTableBuilder {
 
     @Override
     public boolean visit(final TypeDeclaration node) {
-      // TODO
+      final String previousClassName = this.className;
+      final Map<String, MethodDeclaration> previousMethodMap = new HashMap<>(this.methodMap);
+      this.className = node.getName().getIdentifier();
+      if (!hasPublicModifier(node.modifiers()))
+        this.classMap.put(this.className, node);
+      this.methodMap.clear();
+      for (final MethodDeclaration method : node.getMethods())
+        this.methodMap.put(method.getName().getIdentifier(), method);
+      for (final Object o : node.bodyDeclarations())
+        ((ASTNode) o).accept(this);
+      this.className = previousClassName;
+      this.methodMap.clear();
+      this.methodMap.putAll(previousMethodMap);
       return false;
     }
   }
