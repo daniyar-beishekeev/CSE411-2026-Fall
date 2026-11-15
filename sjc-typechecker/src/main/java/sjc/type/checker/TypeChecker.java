@@ -39,7 +39,6 @@ import org.eclipse.jdt.core.dom.SimpleName;
 import org.eclipse.jdt.core.dom.Statement;
 import org.eclipse.jdt.core.dom.TypeDeclaration;
 import org.eclipse.jdt.core.dom.VariableDeclarationStatement;
-import org.eclipse.jdt.core.dom.VariableDeclarationFragment;
 import org.eclipse.jdt.core.dom.WhileStatement;
 
 import sjc.annotation.NonNull;
@@ -244,183 +243,219 @@ public class TypeChecker {
     }
     @Override
     public boolean visit(MethodDeclaration n) {
-      final Type previousReturnType = methodReturnType;
-      final Type returnType = convertType(n, n.getReturnType2());
-      final List<Type> parameterTypes = new ArrayList<>();
-      for (final Object o : n.parameters()) {
-        final SingleVariableDeclaration parameter = (SingleVariableDeclaration) o;
-        final Type parameterType = convertType(parameter, parameter.getType());
-        parameterTypes.add(parameterType);
-        resultTypeMap.put(parameter, parameterType);
+      methodReturnType = convertType(n, n.getReturnType2());
+      List<Type> p = new ArrayList<>();
+      for (Object o : n.parameters()) {
+        SingleVariableDeclaration d = (SingleVariableDeclaration) o;
+        Type t = convertType(n, d.getType());
+        p.add(t);
+        resultTypeMap.put(d, t);
       }
-      resultMethodTypeMap.put(n, new Pair<Type, List<Type>>(returnType, parameterTypes));
-      methodReturnType = returnType;
-      if (n.getBody() != null)
-        n.getBody().accept(this);
-      methodReturnType = previousReturnType;
+      resultMethodTypeMap.put(
+          n, new Pair<Type, List<Type>>(methodReturnType, p));
+      n.getBody().accept(this);
+      methodReturnType = null;
       return false;
     }
     @Override
     public boolean visit(MethodInvocation n) {
-      final Type[] argumentTypes = new Type[n.arguments().size()];
-      for (int i = 0; i < argumentTypes.length; i++) {
+      String c = n.getExpression() == null
+          ? className
+          : ((SimpleName) n.getExpression()).getIdentifier(),
+             m = n.getName().getIdentifier();
+      Type[] a = new Type[n.arguments().size()];
+      for (int i = 0; i < a.length; i++) {
         ((Expression) n.arguments().get(i)).accept(this);
-        argumentTypes[i] = getResult();
+        a[i] = getResult();
       }
-
-      final Expression receiver = n.getExpression();
-      final Object declaration = symbolMap.get(n);
-      if (declaration instanceof MethodDeclaration) {
-        typeCheckMethodInvocation(n, className, n.getName().getIdentifier(), argumentTypes, (MethodDeclaration) declaration);
-      } else {
-        String owner;
-        if (receiver == null) {
-          owner = className;
-        } else if (receiver instanceof SimpleName && !symbolMap.containsKey(receiver)) {
-          owner = ((SimpleName) receiver).getIdentifier();
-        } else {
-          receiver.accept(this);
-          final Type receiverType = getResult();
-          if (!(receiverType instanceof ClassType))
-            throw new Error(n, "Unresolvable method \"" + receiverType + "." + n.getName().getIdentifier() + "\"");
-          owner = ((ClassType) receiverType).name;
-        }
-        final Method method = resolveMethod(n, owner, n.getName().getIdentifier(), argumentTypes);
-        typeCheckMethodInvocation(n, owner, n.getName().getIdentifier(), argumentTypes, method);
-      }
+      Object o = symbolMap.get(n);
+      if (o == null || o instanceof Method)
+        typeCheckMethodInvocation(
+            n, c, m, a, o == null ? resolveMethod(n, c, m, a) : (Method) o);
+      else
+        typeCheckMethodInvocation(n, c, m, a, (MethodDeclaration) o);
       return false;
     }
     @Override
     public boolean visit(SimpleName n) {
-      final Object declaration = symbolMap.get(n);
-      if (declaration instanceof VariableDeclarationStatement) {
-        setResult(n, convertType((ASTNode) declaration, ((VariableDeclarationStatement) declaration).getType()));
-      } else if (declaration instanceof SingleVariableDeclaration) {
-        final SingleVariableDeclaration variable = (SingleVariableDeclaration) declaration;
-        setResult(n, convertType(variable, variable.getType()));
-      } else {
-        throw new Error(n, "Unresolvable symbol \"" + n + "\"");
+      ASTNode p = n.getParent();
+      if (p instanceof Expression || p instanceof Statement) {
+        Object o = symbolMap.get(n);
+        org.eclipse.jdt.core.dom.Type t = o instanceof FieldDeclaration
+            ? ((FieldDeclaration) o).getType()
+            : o instanceof SingleVariableDeclaration
+            ? ((SingleVariableDeclaration) o).getType()
+            : o instanceof VariableDeclarationStatement
+            ? ((VariableDeclarationStatement) o).getType()
+            : null;
+        if (t == null)
+          throw new Error(n, "Unexpected SimpleName: '" + n + "'");
+        setResult(n, convertType(n, t));
       }
       return false;
     }
     @Override
     public boolean visit(TypeDeclaration n) {
-      final String previousClassName = className;
       className = n.getName().getIdentifier();
       resultTypeMap.put(n, tf.getClassType(className));
-      for (final Object o : n.bodyDeclarations())
-        ((ASTNode) o).accept(this);
-      className = previousClassName;
-      return false;
+      return true;
     }
     @Override
     public boolean visit(VariableDeclarationStatement n) {
-      final Type declaredType = convertType(n, n.getType());
-      resultTypeMap.put(n, declaredType);
-      for (final Object o : n.fragments()) {
-        final VariableDeclarationFragment fragment = (VariableDeclarationFragment) o;
-        if (fragment.getInitializer() != null) {
-          fragment.getInitializer().accept(this);
-          final Type initializerType = getResult();
-          if (!isAssignable(declaredType, initializerType))
-            throw new Error(fragment.getInitializer(), "Type mismatch in \"" + fragment.getName() + "=" + fragment.getInitializer() + "\": " + declaredType + " = " + initializerType);
-        }
-      }
+      resultTypeMap.put(n, convertType(n, n.getType()));
       return false;
     }
     @Override
     public boolean visit(Assignment n) {
       n.getLeftHandSide().accept(this);
-      final Type leftType = getResult();
+      Type l = getResult();
       n.getRightHandSide().accept(this);
-      final Type rightType = getResult();
-      if (!isAssignable(leftType, rightType))
-        throw new Error(n, "Type mismatch in \"" + n + "\": " + leftType + " = " + rightType);
+      Type r = getResult();
+      if (!((r instanceof NullType) && (l instanceof NonPrimitiveType))
+          && l != r)
+        throw new Error(n, "Type mismatch in \"" + n + "\": " + l + " = " + r);
       return false;
     }
     @Override
     public boolean visit(ExpressionStatement n) {
+      if (n.getExpression() instanceof PostfixExpression) {
+        n.getExpression().accept(this);
+        assert getResult() == null;
+        return false;
+      }
       n.getExpression().accept(this);
+      if (!(n.getExpression() instanceof Assignment)
+          && !(n.getExpression() instanceof MethodInvocation))
+        throw new Error(n, "Unexpected expression statement: '" + n + "'");
+      getResult();
       return false;
     }
     @Override
     public boolean visit(InfixExpression n) {
-      final InfixExpression.Operator operator = n.getOperator();
-      n.getLeftOperand().accept(this);
-      Type leftType = getResult();
-      n.getRightOperand().accept(this);
-      Type rightType = getResult();
-
-      if (operator == InfixExpression.Operator.CONDITIONAL_AND || operator == InfixExpression.Operator.CONDITIONAL_OR) {
-        if (leftType != tf.Boolean || rightType != tf.Boolean)
-          throw new Error(n, "Expecting a boolean type expression as the " + (leftType != tf.Boolean ? "left" : "right") + "-hand operand of \"" + operator + "\" in \"" + n + "\"");
-        for (final Object o : n.extendedOperands()) {
-          ((Expression) o).accept(this);
-          if (getResult() != tf.Boolean)
-            throw new Error(n, "Expecting a boolean type expression as the right-hand operand of \"" + operator + "\" in \"" + n + "\"");
-        }
+      InfixExpression.Operator o = n.getOperator();
+      if (o == InfixExpression.Operator.AND
+          || o == InfixExpression.Operator.OR
+          || o == InfixExpression.Operator.LEFT_SHIFT
+          || o == InfixExpression.Operator.RIGHT_SHIFT_SIGNED
+          || o == InfixExpression.Operator.RIGHT_SHIFT_UNSIGNED
+          || o == InfixExpression.Operator.XOR) {
+        n.getLeftOperand().accept(this);
+        Type l = getResult();
+        n.getRightOperand().accept(this);
+        Type r = getResult();
+        if (l != tf.Int)
+          throw new Error(n,
+              "Expecting an int type expression as the left-hand operand of \""
+                  + o + "\" in \"" + n + "\"");
+        if (r != tf.Int)
+          throw new Error(n,
+              "Expecting an int type expression as the right-hand operand of \""
+                  + o + "\" in \"" + n + "\"");
+        setResult(n, tf.Int);
+        return false;
+      } else if (o == InfixExpression.Operator.EQUALS
+          || o == InfixExpression.Operator.NOT_EQUALS) {
+        n.getLeftOperand().accept(this);
+        Type l = getResult();
+        n.getRightOperand().accept(this);
+        Type r = getResult();
+        if (!((l instanceof NullType) && (r instanceof NonPrimitiveType))
+            && !((r instanceof NullType) && (l instanceof NonPrimitiveType))
+            && l != r)
+          throw new Error(
+              n, "Type mismatch in \"" + n + "\": " + l + " " + o + " " + r);
         setResult(n, tf.Boolean);
-      } else if (operator == InfixExpression.Operator.EQUALS || operator == InfixExpression.Operator.NOT_EQUALS) {
-        if (!isAssignable(leftType, rightType) && !isAssignable(rightType, leftType))
-          throw new Error(n, "Type mismatch in \"" + n + "\": " + leftType + " " + operator + " " + rightType);
-        for (final Object o : n.extendedOperands()) {
-          ((Expression) o).accept(this);
-          final Type extendedType = getResult();
-          if (!isAssignable(leftType, extendedType) && !isAssignable(extendedType, leftType))
-            throw new Error(n, "Type mismatch in \"" + n + "\": " + leftType + " " + operator + " " + extendedType);
-          leftType = rightType;
-          rightType = extendedType;
-        }
-        setResult(n, tf.Boolean);
-      } else if (operator == InfixExpression.Operator.LESS
-          || operator == InfixExpression.Operator.LESS_EQUALS
-          || operator == InfixExpression.Operator.GREATER
-          || operator == InfixExpression.Operator.GREATER_EQUALS) {
-        if (leftType != tf.Int || rightType != tf.Int)
-          throw new Error(n, "Expecting int type expressions for \"" + operator + "\" in \"" + n + "\"");
-        for (final Object o : n.extendedOperands()) {
-          ((Expression) o).accept(this);
-          if (getResult() != tf.Int)
-            throw new Error(n, "Expecting int type expressions for \"" + operator + "\" in \"" + n + "\"");
-        }
-        setResult(n, tf.Boolean);
-      } else {
-        final boolean booleanOperator = operator == InfixExpression.Operator.AND || operator == InfixExpression.Operator.OR || operator == InfixExpression.Operator.XOR;
-        final Type expected = booleanOperator ? tf.Boolean : tf.Int;
-        if (leftType != expected || rightType != expected)
-          throw new Error(n, "Expecting " + (expected == tf.Int ? "an " : "a ") + expected + " type expression as the " + (leftType != expected ? "left" : "right") + "-hand operand of \"" + operator + "\" in \"" + n + "\"");
-        for (final Object o : n.extendedOperands()) {
-          ((Expression) o).accept(this);
-          if (getResult() != expected)
-            throw new Error(n, "Expecting " + (expected == tf.Int ? "an " : "a ") + expected + " type expression as the right-hand operand of \"" + operator + "\" in \"" + n + "\"");
-        }
-        setResult(n, expected);
+        return false;
       }
-      return false;
+      n.getLeftOperand().accept(this);
+      Type l = getResult();
+      n.getRightOperand().accept(this);
+      Type r = getResult();
+      if (o == InfixExpression.Operator.PLUS
+          || o == InfixExpression.Operator.MINUS
+          || o == InfixExpression.Operator.TIMES
+          || o == InfixExpression.Operator.DIVIDE
+          || o == InfixExpression.Operator.REMAINDER
+          || o == InfixExpression.Operator.LESS
+          || o == InfixExpression.Operator.GREATER
+          || o == InfixExpression.Operator.LESS_EQUALS
+          || o == InfixExpression.Operator.GREATER_EQUALS) {
+        if (l != tf.Int)
+          throw new Error(n,
+              "Expecting an int type expression as the left-hand operand of \""
+                  + o + "\" in \"" + n + "\"");
+        if (r != tf.Int)
+          throw new Error(n,
+              "Expecting an int type expression as the right-hand operand of \""
+                  + o + "\" in \"" + n + "\"");
+        setResult(n, (o == InfixExpression.Operator.LESS
+            || o == InfixExpression.Operator.GREATER
+            || o == InfixExpression.Operator.LESS_EQUALS
+            || o == InfixExpression.Operator.GREATER_EQUALS)
+            ? tf.Boolean : tf.Int);
+        return false;
+      } else if (o == InfixExpression.Operator.CONDITIONAL_AND
+          || o == InfixExpression.Operator.CONDITIONAL_OR) {
+        if (l != tf.Boolean)
+          throw new Error(n,
+              "Expecting a boolean type expression as the left-hand operand of \""
+                  + o + "\" in \"" + n + "\"");
+        if (r != tf.Boolean)
+          throw new Error(n,
+              "Expecting a boolean type expression as the right-hand operand of \""
+                  + o + "\" in \"" + n + "\"");
+        setResult(n, tf.Boolean);
+        return false;
+      }
+      throw new Error(n, "Unexpected InfixExpression: '" + n + "'");
     }
     @Override
     public boolean visit(PrefixExpression n) {
+      if (n.getOperator() == PrefixExpression.Operator.COMPLEMENT) {
+        n.getOperand().accept(this);
+        Type t = getResult();
+        if (t != tf.Int)
+          throw new Error(n,
+              "Expecting an int type expression as the operand of \""
+                  + n.getOperator() + "\" in \"" + n + "\"");
+        setResult(n, tf.Int);
+        return false;
+      }
       n.getOperand().accept(this);
-      final Type operandType = getResult();
-      final PrefixExpression.Operator operator = n.getOperator();
-      final Type expected = (operator == PrefixExpression.Operator.NOT) ? tf.Boolean : tf.Int;
-      if (operandType != expected)
-        throw new Error(n, "Expecting " + (expected == tf.Int ? "an int" : "a boolean") + " type expression as the operand of \"" + operator + "\" in \"" + n + "\"");
-      setResult(n, expected);
-      return false;
+      Type t = getResult();
+      if ((n.getOperator() == PrefixExpression.Operator.PLUS
+              || n.getOperator() == PrefixExpression.Operator.MINUS)
+          && t == tf.Int) {
+        setResult(n, tf.Int);
+        return false;
+      }
+      if (n.getOperator() == PrefixExpression.Operator.NOT && t == tf.Boolean) {
+        setResult(n, tf.Boolean);
+        return false;
+      }
+      if (n.getOperator() == PrefixExpression.Operator.NOT)
+        throw new Error(n,
+            "Expecting a boolean type expression as the operand of \""
+                + n.getOperator() + "\" in \"" + n + "\"");
+      throw new Error(n,
+          "Expecting an int type expression as the operand of \""
+              + n.getOperator() + "\" in \"" + n + "\"");
     }
     @Override
     public boolean visit(ReturnStatement n) {
-      if (n.getExpression() == null) {
-        if (methodReturnType != tf.Void)
-          throw new Error(n, "Expecting " + methodReturnType + " return expression in \"" + n + "\"");
-      } else {
-        if (methodReturnType == tf.Void)
-          throw new Error(n, "Unexpected return's expression in \"" + n + "\"");
-        n.getExpression().accept(this);
-        final Type actualType = getResult();
-        if (!isAssignable(methodReturnType, actualType))
-          throw new Error(n, "Expecting " + methodReturnType + " return expression in \"" + n + "\"");
+      Expression e = n.getExpression();
+      if (methodReturnType == tf.Void && e != null)
+        throw new Error(n, "Unexpected return's expression in \"" + n + "\"");
+      if (methodReturnType != tf.Void && e == null)
+        throw new Error(n, "Expecting a return's expression in \"" + n + "\"");
+      if (e != null) {
+        e.accept(this);
+        Type t = getResult();
+        if (!((t instanceof NullType)
+                && (methodReturnType instanceof NonPrimitiveType))
+            && t != methodReturnType)
+          throw new Error(n, "Expecting " + methodReturnType.name
+              + " return expression in \"" + n + "\"");
       }
       return false;
     }
@@ -428,7 +463,10 @@ public class TypeChecker {
     public boolean visit(IfStatement n) {
       n.getExpression().accept(this);
       if (getResult() != tf.Boolean)
-        throw new Error(n, "Expecting a boolean type expression as the condition of an if-statement: \"" + n.getExpression() + "\"");
+        throw new Error(n,
+            "Expecting a boolean type expression as the condition of an "
+            + "if-statement: \""
+                + n.getExpression() + "\"");
       n.getThenStatement().accept(this);
       if (n.getElseStatement() != null)
         n.getElseStatement().accept(this);
@@ -438,7 +476,10 @@ public class TypeChecker {
     public boolean visit(WhileStatement n) {
       n.getExpression().accept(this);
       if (getResult() != tf.Boolean)
-        throw new Error(n, "Expecting a boolean type expression as the condition of a while-statement: \"" + n.getExpression() + "\"");
+        throw new Error(n,
+            "Expecting a boolean type expression as the condition of a "
+            + "while-statement: \""
+                + n.getExpression() + "\"");
       n.getBody().accept(this);
       return false;
     }
@@ -446,64 +487,90 @@ public class TypeChecker {
     @Override
     public boolean visit(final ArrayAccess node) {
       node.getArray().accept(this);
-      final Type arrayType = getResult();
+      Type t = getResult();
+      if (!(t instanceof ArrayType)) {
+        throw new Error(node, "Expecting an array type in \'" + node + "\"");
+      }
+      final ArrayType at = (ArrayType) t;
       node.getIndex().accept(this);
-      if (getResult() != tf.Int)
-        throw new Error(node, "Expecting an int type for the index of '" + node + "\"");
-      if (!(arrayType instanceof ArrayType))
-        throw new Error(node, "Expecting an array type for \"" + node.getArray() + "\": " + arrayType);
-      setResult(node, ((ArrayType) arrayType).baseType);
+      t = getResult();
+      if (t != this.tf.Int) {
+        throw new Error(node, "Expecting an int type for the index of \'"
+            + node + "\"");
+      }
+      setResult(node, at.baseType);
       return false;
     }
 
     @Override
     public boolean visit(final ArrayCreation node) {
-      final Type elementType = convertType(node, node.getType().getElementType());
-      final ArrayType resultType = tf.getArrayType((BaseType) elementType);
-      for (final Object o : node.dimensions()) {
-        final Expression dimension = (Expression) o;
-        dimension.accept(this);
-        if (getResult() != tf.Int)
-          throw new Error(node, "Expecting an int type expression for the array length in '" + node + "'");
-      }
-      if (node.getInitializer() != null) {
-        final List expressions = node.getInitializer().expressions();
-        for (int i = 0; i < expressions.size(); i++) {
-          final Expression expression = (Expression) expressions.get(i);
-          expression.accept(this);
-          final Type initializerType = getResult();
-          if (!isAssignable(elementType, initializerType))
-            throw new Error(node, "Type mismatch in array initializer element " + i + " in '" + node + "': " + elementType + " : " + initializerType);
+      final ArrayType at = (ArrayType) convertType(node, node.getType());
+      final ArrayInitializer a = node.getInitializer();
+      if (a == null) {
+        ((ASTNode) node.dimensions().get(0)).accept(this);
+        final Type t = getResult();
+        if (t != this.tf.Int) {
+          throw new Error(node,
+              "Expecting an int type expression for the array length in \'"
+                  + node + "\'");
+        }
+      } else {
+        final BaseType bt = at.baseType;
+        int i = 0;
+        for (final Object o : a.expressions()) {
+          ((ASTNode) o).accept(this);
+          final Type t = getResult();
+          if ((t instanceof NullType) && (bt instanceof NonPrimitiveType)) {
+            // ok
+          } else if (t != bt) {
+            throw new Error(node, "Type mismatch in array initializer element "
+                + i + " in \'" + node + "\': " + bt + " : " + t);
+          }
+          i++;
         }
       }
-      setResult(node, resultType);
+      setResult(node, at);
       return false;
     }
 
     @Override
     public boolean visit(final ClassInstanceCreation node) {
-      final Type type = convertType(node, node.getType());
-      if (!(type instanceof ClassType) || !classMap.containsKey(((ClassType) type).name))
-        throw new Error(node, "Unresolvable Type: '" + type + "'");
-      setResult(node, type);
+      final String className = ((SimpleType) node.getType()).getName()
+          .getFullyQualifiedName();
+      if (!this.classMap.containsKey(className)) {
+        throw new Error(node, "Undeclared class type in \'" + node + "\"");
+      }
+      setResult(node, this.tf.getClassType(className));
+      this.symbolMap.put(node, this.classMap.get(className));
       return false;
     }
 
     @Override
     public boolean visit(final ConditionalExpression node) {
       node.getExpression().accept(this);
-      if (getResult() != tf.Boolean)
-        throw new Error(node, "Expecting a boolean type expression as the condition in '" + node + "\"");
+      final Type eType = getResult();
+      if (eType != this.tf.Boolean) {
+        throw new Error(node,
+            "Expecting a boolean type expression as the condition in \'" + node
+                + "\"");
+      }
       node.getThenExpression().accept(this);
       final Type thenType = getResult();
       node.getElseExpression().accept(this);
       final Type elseType = getResult();
-      if (isAssignable(thenType, elseType))
-        setResult(node, thenType);
-      else if (isAssignable(elseType, thenType))
+      if ((thenType instanceof NullType)
+          && (elseType instanceof NonPrimitiveType)) {
         setResult(node, elseType);
-      else
-        throw new Error(node, "Type mismatch for conditional expression '" + node + "\": " + thenType + " : " + elseType);
+        return false;
+      } else if ((thenType instanceof NonPrimitiveType)
+          && (elseType instanceof NullType)) {
+        setResult(node, thenType);
+        return false;
+      } else if (thenType != elseType) {
+        throw new Error(node, "Type mismatch for conditional expression \'"
+            + node + "\": " + thenType + " : " + elseType);
+      }
+      setResult(node, thenType);
       return false;
     }
 
@@ -511,42 +578,63 @@ public class TypeChecker {
     public boolean visit(final DoStatement node) {
       node.getBody().accept(this);
       node.getExpression().accept(this);
-      if (getResult() != tf.Boolean)
-        throw new Error(node, "Expecting a boolean type expression as the condition of a while-statement: \"" + node.getExpression() + "\"");
+      final Type t = getResult();
+      if (t != this.tf.Boolean) {
+        throw new Error(node,
+            "Expecting a boolean type expression as the condition of a while-statement: \""
+                + node.getExpression() + "\"");
+      }
       return false;
     }
 
     @Override
     public boolean visit(final FieldAccess node) {
       node.getExpression().accept(this);
-      final Type receiverType = getResult();
-      if (!(receiverType instanceof ClassType))
-        throw new Error(node, "Unresolvable field \"" + node.getName() + "\" in \"" + receiverType + "\"");
-      final Type fieldType = ((ClassType) receiverType).fieldTypeMap.get(node.getName().getIdentifier());
-      if (fieldType == null)
-        throw new Error(node, "Unresolvable field \"" + node.getName() + "\" in \"" + receiverType + "\"");
+      final Type t = getResult();
+      if (!(t instanceof ClassType)) {
+        throw new Error(node,
+            "Expecting a class type expression in field access: \'" + node
+                + "\'");
+      }
+      final ClassType ct = (ClassType) t;
+      final String fieldName = node.getName().getIdentifier();
+      final Type fieldType = ct.fieldTypeMap.get(fieldName);
+      if (fieldType == null) {
+        throw new Error(node,
+            "Undeclared field in field access of class type \'" + ct + "\': \'"
+                + node + "\'");
+      }
       setResult(node, fieldType);
+      this.symbolMap.put(node, this.fieldMap.get(new Pair<String, String>(
+          ct.name, fieldName)));
       return false;
     }
 
     @Override
     public boolean visit(final ForStatement node) {
-      for (final Object o : node.initializers())
-        ((Expression) o).accept(this);
-      if (node.getExpression() != null) {
-        node.getExpression().accept(this);
-        if (getResult() != tf.Boolean)
-          throw new Error(node, "Expecting a boolean type expression as the condition of a for-statement: \"" + node.getExpression() + "\"");
+      for (final Object o : node.initializers()) {
+        ((ASTNode) o).accept(this);
+      }
+      final Expression e = node.getExpression();
+      if (e != null) {
+        e.accept(this);
+        final Type t = getResult();
+        if (t != this.tf.Boolean) {
+          throw new Error(node,
+              "Expecting a boolean type expression as the condition of a for-statement: \""
+                  + node.getExpression() + "\"");
+        }
+      }
+      for (final Object o : node.updaters()) {
+        ((ASTNode) o).accept(this);
       }
       node.getBody().accept(this);
-      for (final Object o : node.updaters())
-        ((Expression) o).accept(this);
       return false;
     }
 
     @Override
     public boolean visit(final NullLiteral node) {
-      setResult(node, tf.Null);
+      setResult(node, this.tf.Null);
       return false;
     }
 
@@ -563,10 +651,6 @@ public class TypeChecker {
       // postfix expressions in StaticJava are statements,
       // i.e., they are evaluated for their side-effects.
       return false;
-    }
-
-    protected boolean isAssignable(final Type target, final Type source) {
-      return target == source || (source instanceof NullType && target instanceof NonPrimitiveType);
     }
 
   }
